@@ -25,10 +25,16 @@ class AnitaDataset(Dataset):
         frame_sets = []
         for animation_dir in os.listdir(self.root_dir):
             animation_dir_path = os.path.join(self.root_dir, animation_dir)
+            if not os.path.isdir(animation_dir_path):
+                continue
             for type_dir in os.listdir(animation_dir_path):
                 type_dir_path = os.path.join(animation_dir_path, type_dir)
+                if not os.path.isdir(type_dir_path):
+                    continue
                 for scene_dir in os.listdir(type_dir_path):
                     scene_dir_path = os.path.join(type_dir_path, scene_dir)
+                    if not os.path.isdir(scene_dir_path):
+                        continue
                     frame_paths = os.listdir(scene_dir_path)
                     frame_paths.sort()
                     frame_paths = [
