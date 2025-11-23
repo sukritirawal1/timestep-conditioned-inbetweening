@@ -1,5 +1,10 @@
 .venv
 .DS_Store
 __pycache__
+*.pyc
 
 data/
+venv/
+inbetween/
+__pycache__/
+.ipynb_checkpoints/
