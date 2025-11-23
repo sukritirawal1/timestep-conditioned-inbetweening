@@ -48,8 +48,11 @@ class Diffusion:
         return text_embeddings
     
     def encode_image_to_latent(self, images):
-        if not isinstance(images, list):
+        if images.ndim == 3:
             images = [images]
+        elif images.ndim == 4:
+            images = [img for img in images]
+            
         img_list = [self.image_processor.preprocess(x) for x in images]
         img_batch = torch.cat(img_list, dim = 0)
         img_batch = img_batch.to(device=self.device, dtype=self.vae.dtype)
@@ -70,25 +73,43 @@ class Diffusion:
         return images if len(images) > 1 else images[0]
     
     def slerp(self, z0, z1, alpha, dot_threshold=0.9995):
-        v0 = z0.reshape(-1)
-        v1 = z1.reshape(-1)
+        #flatten
+        v0 = z0.reshape(z0.shape[0],-1)
+        v1 = z1.reshape(z1.shape[0],-1)
 
-        dot = torch.dot(v0, v1) / (v0.norm() * v1.norm())
+        dot = torch.sum(v0 * v1, dim=1) / (v0.norm(dim=1) * v1.norm(dim=1))
         dot = torch.clamp(dot, -1.0, 1.0)
+        
+        if not torch.is_tensor(alpha):
+            alpha = torch.tensor(alpha, device=z0.device, dtype=z0.dtype)
+        alpha = alpha.view(1, 1) #broadcast 
+        
+        linear_mask = torch.abs(dot) > dot_threshold
+        non_linear_mask = ~linear_mask
+        
+        v2 = torch.empty_like(v0)
 
-        if torch.abs(dot) > dot_threshold:
-            v2 = (1 - alpha) * v0 + alpha * v1
-        else:
-            theta_0 = torch.arccos(dot)
+        if linear_mask.any():
+            v0_lin = v0[linear_mask]
+            v1_lin = v1[linear_mask]
+            v2[linear_mask] = (1 - alpha) * v0_lin + alpha * v1_lin
+            
+        if non_linear_mask.any():
+            v0_nl = v0[non_linear_mask]
+            v1_nl = v1[non_linear_mask]
+            dot_nl = dot[non_linear_mask]
+
+            theta_0 = torch.arccos(dot_nl)
             sin_theta_0 = torch.sin(theta_0)
-            theta_t = theta_0 * alpha
+            theta_t = theta_0 * alpha.squeeze()
             sin_theta_t = torch.sin(theta_t)
 
             s0 = torch.sin(theta_0 - theta_t) / sin_theta_0
             s1 = sin_theta_t / sin_theta_0
-            v2 = s0 * v0 + s1 * v1
+            v2[non_linear_mask] = s0.unsqueeze(1) * v0_nl + s1.unsqueeze(1) * v1_nl
 
         return v2.reshape_as(z0)
+
     
     def denoise_latent(self, z_interp, num_inference_steps=25, noise_strength = 0.3, guidance_scale = 1.0):
         self.scheduler.set_timesteps(num_inference_steps, device = self.device)
