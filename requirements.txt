@@ -9,3 +9,4 @@ Pillow>=10.0.0
 tqdm>=4.66.0
 ipykernel
 matplotlib
+opencv-python>=4.8.0
