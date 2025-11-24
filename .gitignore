@@ -5,6 +5,7 @@ __pycache__
 
 data/
 venv/
+output/
 inbetween/
 __pycache__/
 .ipynb_checkpoints/
