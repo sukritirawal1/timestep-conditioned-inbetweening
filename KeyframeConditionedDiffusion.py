@@ -140,7 +140,7 @@ class KeyframeConditionedDiffusion(nn.Module):
 
             # --- Build GT row: [start, gt_0, gt_1, ..., gt_{T-1}, end] ---
             gt_frames = [self._tensor_to_pil(start_i)]
-            for t_idx in range(T):
+            for t_idx in range(N):
                 gt_frames.append(self._tensor_to_pil(targets_i[t_idx]))
             gt_frames.append(self._tensor_to_pil(end_i))
 
@@ -189,7 +189,7 @@ class KeyframeConditionedDiffusion(nn.Module):
         for epoch in range(num_epochs):
             self.train()
             train_loss = 0.0
-            for batch in tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{num_epochs}"):
+            for i, batch in tqdm(enumerate(train_loader), desc=f"Training Epoch {epoch+1}/{num_epochs}"):
                 optimizer.zero_grad()
                 loss = self.training_step(batch)
                 loss.backward()
@@ -279,7 +279,7 @@ def main(args):
     model = KeyframeConditionedDiffusion().to(device)
     
     print("starting training...")
-    model.train_model(train_loader, val_loader, num_epochs=10, lr=1e-4, save_dir=args.save_dir)
+    model.train_model(train_loader, val_loader, num_epochs=args.num_epochs, lr=1e-4, save_dir=args.save_dir)
     
 
 if __name__ == "__main__":
@@ -287,5 +287,6 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", default="model_ckpt", type=str)
     parser.add_argument("--num_denoising_steps", type=int, default=25)
     parser.add_argument("--guidance_scale", type=float, default=3.0)
+    parser.add_argument("--num_epochs", type=int, default=5)
     args = parser.parse_args()
     main(args)
