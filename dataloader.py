@@ -63,6 +63,7 @@ class AnitaDataset(Dataset):
             v2.functional.to_dtype(image, torch.float32, scale=True) for image in images
         ]
         images = [self.transform(image) for image in images]
+        images = [image.clamp(0.0, 1.0) for image in images]
         return {
             "anchor_start": images[0],
             "anchor_end": images[-1],

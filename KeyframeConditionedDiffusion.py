@@ -15,6 +15,9 @@ from pathlib import Path
 from dataloader import AnitaDataset
 from torch.utils.data import DataLoader
 import argparse
+import gc
+
+from transformers import CLIPVisionModelWithProjection, CLIPProcessor
 
 class KeyframeConditionedDiffusion(nn.Module):
     def __init__(self, model_name="runwayml/stable-diffusion-v1-5", val_visualization_dir = "val_viz", device=None):
@@ -34,13 +37,20 @@ class KeyframeConditionedDiffusion(nn.Module):
         self.image_processor = pipe.image_processor
         self.scheduler = pipe.scheduler
         
-        latent_channels = self.vae.config.latent_channels
-        context_dim = self.unet.config.cross_attention_dim
-        self.image_conditioner = KeyframeConditionEncoder(latent_channels=latent_channels,
-                                                          context_dim = context_dim,
-                                                          num_tokens = 64).to(self.device)
+        # latent_channels = self.vae.config.latent_channels
+        # context_dim = self.unet.config.cross_attention_dim
         
-        pipe.safety_checker = None
+        self.clip_model = CLIPVisionModelWithProjection.from_pretrained("openai/clip-vit-large-patch14").to(self.device)
+        self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
+        
+        self.clip_projection = self.clip_model.visual_projection
+        
+        for param in self.clip_model.parameters():
+            param.requires_grad = False
+
+        self.clip_model.eval() 
+        
+        self.safety_checker = None
         self.pipe = pipe
     
    
@@ -61,6 +71,19 @@ class KeyframeConditionedDiffusion(nn.Module):
             latents = dist.sample() * self.vae.config.scaling_factor
         return latents
     
+    def null_embedding(self, cond):
+        return torch.zeros_like(cond)
+    
+    
+    def encode_condition_CLIP(self, images):
+        inputs = self.clip_processor(images=images, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            outputs = self.clip_model(**inputs)
+            patch_1024 = outputs.last_hidden_state[:, 1:, :] #[B, CLS+patches, 1024]
+            patch_768 = self.clip_projection(patch_1024) #[B, patches, 768]
+        return patch_768
+        
+    
     def decode_latent_to_image(self, latent):
         with torch.no_grad():
             latents = latent/self.vae.config.scaling_factor
@@ -72,10 +95,13 @@ class KeyframeConditionedDiffusion(nn.Module):
         return [Image.fromarray(image) for image in img]
     
     def get_keyframe_condition(self, start_frames, end_frames):
-        with torch.no_grad():
-            z_start = self.encode_image_to_latent(start_frames)
-            z_end = self.encode_image_to_latent(end_frames)
-        cond = self.image_conditioner(z_start, z_end)
+        # with torch.no_grad():
+        #     z_start = self.encode_image_to_latent(start_frames)
+        #     z_end = self.encode_image_to_latent(end_frames)
+        # cond = self.image_conditioner(z_start, z_end)
+        start_frames = self.encode_condition_CLIP(start_frames)
+        end_frames = self.encode_condition_CLIP(end_frames)
+        cond = torch.cat([start_frames, end_frames], dim=1)
         return cond
     
     def training_step(self, batch):
@@ -97,6 +123,7 @@ class KeyframeConditionedDiffusion(nn.Module):
         z0_noisy = self.scheduler.add_noise(z0, noise, t)
         
         keyframe_cond = self.get_keyframe_condition(start, end)
+        # print(keyframe_cond.shape)
         
         noise_pred = self.unet(
             z0_noisy,
@@ -189,22 +216,27 @@ class KeyframeConditionedDiffusion(nn.Module):
         for epoch in range(num_epochs):
             self.train()
             train_loss = 0.0
-            for i, batch in tqdm(enumerate(train_loader), desc=f"Training Epoch {epoch+1}/{num_epochs}"):
+            for batch in tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{num_epochs}"):
+                # if i > 5:
+                #     break
                 optimizer.zero_grad()
                 loss = self.training_step(batch)
                 loss.backward()
                 optimizer.step()
                 train_loss += loss.item()
+            torch.cuda.empty_cache()
+            gc.collect()
             avg_train_loss = train_loss / len(train_loader)
             print(f"Epoch {epoch+1}, Train Loss: {avg_train_loss:.4f}")
             val_loss = self.val_metrics(val_loader, epoch)
             if val_loss <= best_val_loss:
+                best_val_loss = val_loss
                 torch.save(self.state_dict(), os.path.join(save_dir, f"best_model.pth"))
         
     
     def cfg_forward(self, latents, t, cond_embeds, guidance_scale):
-        batch_size = latents.shape[0]
-        uncond_embeds = self.image_conditioner.null_embedding(batch_size)
+        # batch_size = latents.shape[0]
+        uncond_embeds = self.null_embedding(cond_embeds)
         
         cond_embeds = torch.cat([uncond_embeds, cond_embeds], dim=0)
         latents = torch.cat([latents, latents], dim=0)
@@ -269,9 +301,9 @@ class KeyframeConditionedDiffusion(nn.Module):
 def main(args):
     
     print("loading dataset and dataloader...")
-    train_data = AnitaDataset("train", image_shape = (512,512))
+    train_data = AnitaDataset("train", image_shape = (224,224))
     train_loader = DataLoader(train_data, batch_size=5, shuffle=False, num_workers=4)
-    val_data = AnitaDataset("val", image_shape = (512,512))
+    val_data = AnitaDataset("val", image_shape = (224,224))
     val_loader = DataLoader(val_data, batch_size=5, shuffle=False, num_workers=4)
     
     print("initializing model...")
