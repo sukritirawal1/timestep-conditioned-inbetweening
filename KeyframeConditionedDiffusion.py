@@ -134,7 +134,7 @@ class KeyframeConditionedDiffusion(nn.Module):
         loss = F.mse_loss(noise_pred, noise)
         return loss
     
-    def val_metrics(self, val_loader, epoch):
+    def val_metrics(self, val_loader, epoch, guidance_scale = 3.0, num_inference_steps=25):
         self.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -146,6 +146,8 @@ class KeyframeConditionedDiffusion(nn.Module):
                         batch["anchor_start"].to(self.device),
                         batch["anchor_end"].to(self.device),
                         num_inbetweens=batch["targets"].shape[1],
+                        num_inference_steps= num_inference_steps,
+                        guidance_scale = guidance_scale
                     )   
                     self.visualize_inbetweens(batch, pred_seq, epoch)
         avg_val_loss = val_loss / len(val_loader)
@@ -209,7 +211,7 @@ class KeyframeConditionedDiffusion(nn.Module):
             plt.savefig(out_path)
             plt.close(fig)
     
-    def train_model(self, train_loader, val_loader, num_epochs = 5, lr = 1e-4, save_dir = "model_ckpt"):
+    def train_model(self, train_loader, val_loader, num_epochs = 5, lr = 1e-4, save_dir = "model_ckpt", guidance_scale = 3.0, num_denoising_steps = 25):
         optimizer = torch.optim.AdamW(self.parameters(), lr=lr)
         os.makedirs(save_dir, exist_ok=True)
         best_val_loss = float("inf")
@@ -228,7 +230,7 @@ class KeyframeConditionedDiffusion(nn.Module):
             gc.collect()
             avg_train_loss = train_loss / len(train_loader)
             print(f"Epoch {epoch+1}, Train Loss: {avg_train_loss:.4f}")
-            val_loss = self.val_metrics(val_loader, epoch)
+            val_loss = self.val_metrics(val_loader, epoch, guidance_scale = guidance_scale, num_inference_steps=num_denoising_steps)
             if val_loss <= best_val_loss:
                 best_val_loss = val_loss
                 torch.save(self.state_dict(), os.path.join(save_dir, f"best_model.pth"))
@@ -311,7 +313,7 @@ def main(args):
     model = KeyframeConditionedDiffusion().to(device)
     
     print("starting training...")
-    model.train_model(train_loader, val_loader, num_epochs=args.num_epochs, lr=1e-4, save_dir=args.save_dir)
+    model.train_model(train_loader, val_loader, num_epochs=args.num_epochs, lr=1e-4, save_dir=args.save_dir, guidance_scale = args.guidance_scale, num_denoising_steps = args.num_denoising_steps)
     
 
 if __name__ == "__main__":
