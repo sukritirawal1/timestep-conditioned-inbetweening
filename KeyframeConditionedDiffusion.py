@@ -148,11 +148,9 @@ class KeyframeConditionedDiffusion(nn.Module):
         epoch,
         guidance_scale=3.0,
         num_inference_steps=25,
-        log_to_wandb=False,
     ):
         self.eval()
         val_loss = 0.0
-        wandb_images = []
         with torch.no_grad():
             for i, batch in tqdm(enumerate(val_loader), desc="Validation"):
                 # Use cfg_dropout_prob=0.0 during validation to always use actual conditions
@@ -166,14 +164,12 @@ class KeyframeConditionedDiffusion(nn.Module):
                         num_inference_steps=num_inference_steps,
                         guidance_scale=guidance_scale,
                     )
-                    wandb_images = self.visualize_inbetweens(
-                        batch, pred_seq, epoch, log_to_wandb=log_to_wandb
-                    )
+                    self.visualize_inbetweens(batch, pred_seq, epoch)
         avg_val_loss = val_loss / len(val_loader)
         print(f"Validation Loss: {avg_val_loss:.4f}")
-        return avg_val_loss, wandb_images
+        return avg_val_loss
 
-    def visualize_inbetweens(self, batch, pred_seq, epoch, log_to_wandb=False):
+    def visualize_inbetweens(self, batch, pred_seq, epoch):
         os.makedirs(self.val_vis_dir, exist_ok=True)
         self.eval()
         start = batch["anchor_start"].to(self.device)
@@ -181,7 +177,6 @@ class KeyframeConditionedDiffusion(nn.Module):
         targets = batch["targets"].to(self.device)
         B, N, _, _, _ = targets.shape
 
-        wandb_images = []
         for i in range(B):
             start_i = start[i]  # (3, H, W)
             end_i = end[i]  # (3, H, W)
@@ -232,20 +227,7 @@ class KeyframeConditionedDiffusion(nn.Module):
             )
             plt.savefig(out_path)
 
-            # Log to wandb if requested
-            if log_to_wandb:
-                # Convert matplotlib figure to PIL Image for wandb
-                fig.canvas.draw()
-                img_array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-                img_array = img_array.reshape(
-                    fig.canvas.get_width_height()[::-1] + (3,)
-                )
-                img_pil = Image.fromarray(img_array)
-                wandb_images.append(wandb.Image(img_pil, caption=f"Sample {i}"))
-
             plt.close(fig)
-
-        return wandb_images
 
     def train_model(
         self,
@@ -299,12 +281,11 @@ class KeyframeConditionedDiffusion(nn.Module):
             gc.collect()
             avg_train_loss = train_loss / len(train_loader)
             print(f"Epoch {epoch+1}, Train Loss: {avg_train_loss:.4f}")
-            val_loss, wandb_images = self.val_metrics(
+            val_loss = self.val_metrics(
                 val_loader,
                 epoch,
                 guidance_scale=guidance_scale,
                 num_inference_steps=num_denoising_steps,
-                log_to_wandb=use_wandb,
             )
 
             # Update learning rate based on validation loss
@@ -320,8 +301,6 @@ class KeyframeConditionedDiffusion(nn.Module):
                     "train/learning_rate": current_lr,
                     "train/epoch": epoch + 1,
                 }
-                if wandb_images:
-                    log_dict["val/predictions"] = wandb_images
                 wandb.log(log_dict)
 
             # Save best model
