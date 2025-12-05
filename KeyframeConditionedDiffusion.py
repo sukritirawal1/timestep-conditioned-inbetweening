@@ -276,7 +276,6 @@ class KeyframeConditionedDiffusion(nn.Module):
             factor=lr_factor,
             patience=lr_patience,
             min_lr=lr_min,
-            verbose=True,
         )
 
         os.makedirs(save_dir, exist_ok=True)
