@@ -25,7 +25,7 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
     def __init__(
         self,
         model_name="runwayml/stable-diffusion-v1-5",
-        val_visualization_dir="val_viz",
+        save_dir="output",
         device=None,
     ):
         super().__init__()
@@ -33,7 +33,7 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
             device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         )
         dtype = torch.float32  # if self.device == "cpu" else torch.float16
-        self.val_vis_dir = val_visualization_dir
+        self.val_vis_dir = save_dir
         pipe = StableDiffusionPipeline.from_pretrained(
             model_name, torch_dtype=dtype
         ).to(self.device)
@@ -311,7 +311,9 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
             fig.tight_layout()
 
             out_path = os.path.join(
-                self.val_vis_dir, f"epoch_{epoch+1:03d}_sample_{i}.png"
+                self.val_vis_dir,
+                "val_visualizations",
+                f"epoch_{epoch+1:03d}_sample_{i}.png",
             )
             plt.savefig(out_path)
             plt.close(fig)
@@ -322,7 +324,7 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         val_loader,
         num_epochs=5,
         lr=1e-4,
-        save_dir="model_ckpt",
+        save_dir="output",
         noise_strength=0.3,
         num_denoising_steps=25,
         structure_loss=False,
@@ -358,7 +360,10 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
             )
             if val_loss <= best_val_loss:
                 best_val_loss = val_loss
-                torch.save(self.state_dict(), os.path.join(save_dir, f"best_model.pth"))
+                torch.save(
+                    self.state_dict(),
+                    os.path.join(save_dir, "model_ckpt", f"best_model.pth"),
+                )
 
     def cfg_forward(self, latents, t, cond_embeds, guidance_scale):
         # batch_size = latents.shape[0]
@@ -471,24 +476,26 @@ def main(args):
 
     print("initializing model...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = SlerpKeyframeConditionedDiffusion().to(device)
+    model = SlerpKeyframeConditionedDiffusion(save_dir=args.save_dir).to(device)
 
     print("starting training...")
-    model.train_model(
-        train_loader,
-        val_loader,
-        num_epochs=args.num_epochs_adapter_only,
-        lr=1e-4,
-        save_dir=args.save_dir,
-        noise_strength=args.noise_strength,
-        num_denoising_steps=args.num_denoising_steps,
-        structure_loss=args.use_structure_loss,
-        guidance_scale=args.guidance_scale,
-    )
+    # model.train_model(
+    #     train_loader,
+    #     val_loader,
+    #     num_epochs=args.num_epochs_adapter_only,
+    #     lr=1e-4,
+    #     save_dir=args.save_dir,
+    #     noise_strength=args.noise_strength,
+    #     num_denoising_steps=args.num_denoising_steps,
+    #     structure_loss=args.use_structure_loss,
+    #     guidance_scale=args.guidance_scale,
+    # )
 
     for name, param in model.unet.named_parameters():
         if "attn2" in name:  # CA layers
             param.requires_grad = True
+        else:
+            param.requires_grad = False
 
     model.train_model(
         train_loader,
@@ -505,7 +512,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Diffusion-Baseline-Inbetweening")
-    parser.add_argument("--save_dir", default="model_ckpt", type=str)
+    parser.add_argument("--save_dir", default="output", type=str)
     parser.add_argument("--num_denoising_steps", type=int, default=25)
     parser.add_argument("--guidance_scale", type=float, default=1.0)
     parser.add_argument("--noise_strength", type=float, default=0.3)
