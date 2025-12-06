@@ -1,10 +1,71 @@
-.venv
-.DS_Store
-__pycache__
-*.pyc
+# Data and results
+data/*_results/
+data/optical_flow_results/
+data/lambda_baseline_results/
+optical_flow_results.tar.gz
+optical_flow_evaluation.json
+lambda_baseline_evaluation.json
+*.tar.gz
+*.zip
 
-data/
-venv/
-inbetween/
+# Model checkpoints and weights
+checkpoints/
+*.ckpt
+*.pth
+*.pt
+*.safetensors
+
+# Large model files
+models/
+
+# Generated images
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# But keep example images if you have any
+!example_images/*.png
+!assets/*.png
+
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Jupyter
 .ipynb_checkpoints/
+*.ipynb
+
+# Environment
+venv/
+env/
+inbetween/
+*.env
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Cache
+.cache/
+*.cache
+.huggingface/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
