@@ -156,6 +156,104 @@ class Diffusion:
         
         return outputs
 
+    def encode_keyframes_for_conditioning(self, start_frames, end_frames):
+        """
+        Encode the keyframes and pool them to create conditioning 
+        This replaces the text conditioning with the image-based conditioning
+        """
+
+        # Get the latent representations
+        z_start = self.encode_image_to_latent(start_frames)
+        z_end = self.encode_image_to_latent(end_frames)
+
+        # Concatenate and normalize the features 
+        z_combined = torch.cat([feat_start, feat_end], dim=1)
+
+        # Expand to match the text embedding shape 
+        batch_size = z_combined.shape[0]
+        z_flat = z_combined.flatten(start_dim=1)
+
+        if not hasattr(self, 'keyframe_proj'):
+            text_dim = 768
+            seq_len = 77
+            self.keyframe_proj = torch.nn.Sequential(
+                torch.nn.Linear(text_dim * seq_len, text_dim), 
+                torch.nn.ReLU(),
+                torch.nn.Linear(2048, text_dim * seq_len)
+            ).to(self.device)
+
+        projected = self.keyframe_proj(z_flat)
+
+        conditioning = projected.reshape(batch_size, 77, 768)
+        
+        return conditioning 
+    
+    def denoise_with_keyframe_conditioning(self, z_interp, start_frame, end_frame, num_inference_steps = 25, noise_strength = 0.3, guidance_scale=1.0):
+        """
+        Denoise the latent with keyframe conditioning
+        """
+
+        self.scheduler.set_timesteps(num_inference_steps, device = self.device)
+        timesteps = self.scheduler.timesteps
+
+        keyframe_embeds = self.encode_keyframes_for_conditioning(start_frame, end_frame)
+
+        if guidance_scale > 1.0:
+            uncond_embeds = torch.zeros_like(keyframe_embeds)
+        
+        start_idx = int(noise_strength * (len(timesteps) - 1))
+        t_start = timesteps[start_idx]
+        noise = torch.randn_like(z_interp)
+        latents = self.scheduler.add_noise(z_interp, noise, t_start)
+
+        for t in timesteps[start_idx:]:
+            latent_input = self.scheduler.scale_model_input(latents, t)
+            if guidance_scale > 1.0:
+                latent_input_doubled = torch.cat([latent_intput]*2)
+                embeds_combined = torch.cat([uncond_embeds, keyframe_embeds])
+
+                noise_pred = self.unet(
+                    latent_input_doubled,
+                    t, 
+                    encoder_hidden_states=embeds_combined
+                ).sample
+
+                noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+            else:
+                noise_pred = self.unet(
+                    latent_input,
+                    t,
+                    encoder_hidden_states=keyframe_embeds
+                ).sample
+            latents = self.scheduler.step(noise_pred, t, latents).prev_sample
+        
+        return latents
+
+@torch.no_grad()
+def generate_inbetweens_with_keyframe_conditioning(self, start_frames, end_frames, num_inbetweens=3, num_inference_steps=25, noise_strength=0.3, guidance_scale=7.5):
+    """
+    Baseline 3: Generate inbetween frames with keyframe conditioning
+    """
+    if not isinstance(start_frames, list):
+        start_frames = [start_frames]
+    if not isinstance(end_frames, list):
+        end_frames = [end_frames]
+    
+    z0 = self.encode_image_to_latent(start_frames)
+    z1 = self.encode_image_to_latent(end_frames)
+
+    outputs = []
+    for i in range(1, num_inbetweens + 1):
+        alpha = i / (num_inbetweens + 1)
+        z_interp = self.slerp(z0, z1, alpha)
+        z_denoised = self.denoise_with_keyframe_conditioning(z_interp, start_frames[0], end_frames[0], num_inference_steps, noise_strength, guidance_scale)
+        decoded = self.decode_latent_to_image(z_denoised)
+        outputs.append(decoded)
+    
+    return outputs
+
+
 def process_images(image_paths, size=(512, 512)):
     if isinstance(image_paths, (str, Path)):
         image_paths = [image_paths]
@@ -213,6 +311,7 @@ def visualize_results(start_frames, end_frames, inbetweens, save_path=None):
         print(f"Saved visualization to {save_path}")
     
     plt.show()
+
 
 
 # def main():
