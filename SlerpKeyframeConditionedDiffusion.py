@@ -332,6 +332,8 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
     ):
         optimizer = torch.optim.AdamW(self.parameters(), lr=lr)
         os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(os.path.join(save_dir, "model_ckpt"), exist_ok=True)
+        os.makedirs(os.path.join(save_dir, "val_visualizations"), exist_ok=True)
         best_val_loss = float("inf")
         for epoch in range(num_epochs):
             self.train()
