@@ -465,11 +465,13 @@ def main(args):
     print("fixed2")
 
     print("loading dataset and dataloader...")
-    train_data = AnitaDataset("train", image_shape=(224, 224))
+    train_data = AnitaDataset(
+        os.path.join(args.data_dir, "train"), image_shape=(224, 224)
+    )
     train_loader = DataLoader(
         train_data, batch_size=8, shuffle=True, num_workers=mp.cpu_count()
     )
-    val_data = AnitaDataset("val", image_shape=(224, 224))
+    val_data = AnitaDataset(os.path.join(args.data_dir, "val"), image_shape=(224, 224))
     val_loader = DataLoader(
         val_data, batch_size=8, shuffle=True, num_workers=mp.cpu_count()
     )
@@ -519,5 +521,6 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs_adapter_only", type=int, default=3)
     parser.add_argument("--num_epochs_unfreeze_CA", type=int, default=2)
     parser.add_argument("--use_structure_loss", action="store_true")
+    parser.add_argument("--data_dir", type=str, default="data")
     args = parser.parse_args()
     main(args)
