@@ -471,11 +471,13 @@ def main(args):
     print("patched clip3")
 
     print("loading dataset and dataloader...")
-    train_data = AnitaDataset("train", image_shape=(224, 224))
+    train_data = AnitaDataset(
+        os.path.join(args.data_dir, "train"), image_shape=(224, 224)
+    )
     train_loader = DataLoader(
         train_data, batch_size=args.batch_size, shuffle=True, num_workers=4
     )
-    val_data = AnitaDataset("val", image_shape=(224, 224))
+    val_data = AnitaDataset(os.path.join(args.data_dir, "val"), image_shape=(224, 224))
     val_loader = DataLoader(
         val_data, batch_size=args.batch_size, shuffle=True, num_workers=4
     )
@@ -530,5 +532,6 @@ if __name__ == "__main__":
     parser.add_argument("--val_visualization_dir", type=str, default="val_viz")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--batch_size", type=int, default=5)
+    parser.add_argument("--data_dir", type=str, default=".")
     args = parser.parse_args()
     main(args)
