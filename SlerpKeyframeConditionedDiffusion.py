@@ -20,7 +20,7 @@ import gc
 from transformers import CLIPVisionModelWithProjection, CLIPProcessor
 
 class SlerpKeyframeConditionedDiffusion(nn.Module):
-    def __init__(self, model_name="runwayml/stable-diffusion-v1-5", val_visualization_dir = "val_viz", device=None):
+    def __init__(self, model_name="runwayml/stable-diffusion-v1-5", val_visualization_dir = "val_viz", load_model_from = None, device=None):
         super().__init__()
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = torch.float32 #if self.device == "cpu" else torch.float16
@@ -104,12 +104,18 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         return torch.zeros_like(cond)
     
     
+    # def encode_condition_CLIP(self, images):
+    #     inputs = self.clip_processor(images=images, return_tensors="pt").to(self.device)
+    #     with torch.no_grad():
+    #         outputs = self.clip_model(**inputs)
+    #         return outputs.image_embeds
     def encode_condition_CLIP(self, images):
         inputs = self.clip_processor(images=images, return_tensors="pt").to(self.device)
         with torch.no_grad():
             outputs = self.clip_model(**inputs)
-            return outputs.image_embeds
-
+            patch_1024 = outputs.last_hidden_state[:, 1:, :] #[B, CLS+patches, 1024]
+            patch_768 = self.clip_projection(patch_1024) #[B, patches, 768]
+        return patch_768
     
     def decode_latent_to_image(self, latent):
         with torch.no_grad():
@@ -167,7 +173,7 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         start_feat = self.encode_condition_CLIP(start_frames)
         end_feat = self.encode_condition_CLIP(end_frames)
         combined_feat = (1 - timestep) * start_feat + timestep * end_feat
-        keyframe_cond = self.visual_adapter(combined_feat).unsqueeze(1) 
+        keyframe_cond = self.visual_adapter(combined_feat)
         return keyframe_cond
     
     def training_step(self, batch, structure_loss = False):
@@ -317,6 +323,8 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
             if val_loss <= best_val_loss:
                 best_val_loss = val_loss
                 torch.save(self.state_dict(), os.path.join(save_dir, f"best_model.pth"))
+            if (epoch + 1) % 5 == 0:
+                torch.save(self.state_dict(), os.path.join(save_dir, f"model_epoch_{epoch+1}.pth"))
         
     
     def cfg_forward(self, latents, t, cond_embeds, guidance_scale):
@@ -401,27 +409,27 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
 
 def main(args):
     
-    print("fixed2")
+    print("patched clip3")
     
     print("loading dataset and dataloader...")
     train_data = AnitaDataset("train", image_shape = (224,224))
-    train_loader = DataLoader(train_data, batch_size=5, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_data, batch_size=5, shuffle=True, num_workers=4)
     val_data = AnitaDataset("val", image_shape = (224,224))
-    val_loader = DataLoader(val_data, batch_size=5, shuffle=False, num_workers=4)
+    val_loader = DataLoader(val_data, batch_size=5, shuffle=True, num_workers=4)
     
     print("initializing model...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = SlerpKeyframeConditionedDiffusion().to(device)
+    model = SlerpKeyframeConditionedDiffusion(val_visualization_dir=args.val_visualization_dir).to(device)
     
     print("starting training...")
-    model.train_model(train_loader, 
-                      val_loader, 
-                      num_epochs = args.num_epochs_adapter_only, 
-                      lr=1e-4, save_dir=args.save_dir, 
-                      noise_strength = args.noise_strength, 
-                      num_denoising_steps = args.num_denoising_steps, 
-                      structure_loss = args.use_structure_loss, 
-                      guidance_scale = args.guidance_scale)
+    # model.train_model(train_loader, 
+    #                   val_loader, 
+    #                   num_epochs = args.num_epochs_adapter_only, 
+    #                   lr=1e-4, save_dir=args.save_dir, 
+    #                   noise_strength = args.noise_strength, 
+    #                   num_denoising_steps = args.num_denoising_steps, 
+    #                   structure_loss = args.use_structure_loss, 
+    #                   guidance_scale = args.guidance_scale)
     
     for name, param in model.unet.named_parameters():
         if 'attn2' in name:  #CA layers
@@ -446,5 +454,6 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs_adapter_only", type=int, default=3)
     parser.add_argument("--num_epochs_unfreeze_CA", type=int, default=2)
     parser.add_argument("--use_structure_loss", action='store_true')
+    parser.add_argument("--val_visualization_dir", type=str, default="val_viz")
     args = parser.parse_args()
     main(args)
