@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 import argparse
 import gc
 
-from transformers import CLIPVisionModelWithProjection, CLIPProcessor
+# from transformers import CLIPVisionModelWithProjection, CLIPProcessor
 
 class SlerpKeyframeConditionedDiffusion(nn.Module):
     def __init__(self, model_name="runwayml/stable-diffusion-v1-5", val_visualization_dir = "val_viz", device=None):
@@ -45,20 +45,20 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         self.text_embeds = self._get_text_embeds(self.prompt)
         
         context_dim = self.unet.config.cross_attention_dim
-        self.visual_adapter = nn.Sequential(nn.Linear(768, context_dim), 
+        self.visual_adapter = nn.Sequential(nn.Linear(3136, context_dim), 
                                             nn.LayerNorm(context_dim), 
                                             nn.ReLU(), 
                                             nn.Linear(context_dim, context_dim)
                                     )
         
-        self.clip_model = CLIPVisionModelWithProjection.from_pretrained("openai/clip-vit-large-patch14").to(self.device)
-        self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
-        self.clip_projection = self.clip_model.visual_projection
+        # self.clip_model = CLIPVisionModelWithProjection.from_pretrained("openai/clip-vit-large-patch14").to(self.device)
+        # self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
+        # self.clip_projection = self.clip_model.visual_projection
         
-        for param in self.clip_model.parameters():
-            param.requires_grad = False
+        # for param in self.clip_model.parameters():
+        #     param.requires_grad = False
 
-        self.clip_model.eval() 
+        # self.clip_model.eval() 
         
         self.safety_checker = None
         self.pipe = pipe
@@ -104,11 +104,13 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         return torch.zeros_like(cond)
     
     
-    def encode_condition_CLIP(self, images):
-        inputs = self.clip_processor(images=images, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self.clip_model(**inputs)
-            return outputs.image_embeds
+    # def encode_condition_CLIP(self, images):
+    #     inputs = self.clip_processor(images=images, return_tensors="pt").to(self.device)
+    #     with torch.no_grad():
+    #         outputs = self.clip_model(**inputs)
+    #         return outputs.image_embeds
+
+
 
     
     def decode_latent_to_image(self, latent):
@@ -164,10 +166,18 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         #     z_start = self.encode_image_to_latent(start_frames)
         #     z_end = self.encode_image_to_latent(end_frames)
         # cond = self.image_conditioner(z_start, z_end)
-        start_feat = self.encode_condition_CLIP(start_frames)
-        end_feat = self.encode_condition_CLIP(end_frames)
-        combined_feat = (1 - timestep) * start_feat + timestep * end_feat
-        keyframe_cond = self.visual_adapter(combined_feat).unsqueeze(1) 
+        # start_feat = self.encode_condition_CLIP(start_frames)
+        # end_feat = self.encode_condition_CLIP(end_frames)
+        # combined_feat = (1 - timestep) * start_feat + timestep * end_feat
+        # keyframe_cond = self.visual_adapter(combined_feat).unsqueeze(1) 
+        # return keyframe_cond
+
+        # New VAE Latent-based Implementation 
+        z_start = self.encode_image_to_latent(start_frames)
+        z_end = self.encode_image_to_latent(end_frames)
+        z_cond = self.slerp(z_start, z_end, timestep)
+        z_flat = z_cond.flatten(start_dim=1)
+        keyframe_cond = self.visual_adapter(z_flat).unsqueeze(1)
         return keyframe_cond
     
     def training_step(self, batch, structure_loss = False):
@@ -209,6 +219,9 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         
         if structure_loss:
             with torch.no_grad():
+                if self.scheduler.timesteps is None:
+                    self.scheduler.set_timesteps(self.scheduler.config.num_train_timesteps, device=self.device)
+         
                 z_pred = self.scheduler.step(noise_pred, t, zt_noisy).prev_sample
             structure_loss = F.mse_loss(z_pred, z_middle)
             
@@ -317,6 +330,9 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
             if val_loss <= best_val_loss:
                 best_val_loss = val_loss
                 torch.save(self.state_dict(), os.path.join(save_dir, f"best_model.pth"))
+            if (epoch + 1) % 5 == 0:
+                torch.save(self.state_dict(), os.path.join(save_dir, f"checkpoint_epoch_{epoch+1}.pth"))
+                print(f"Checkpoint saved at epoch {epoch+1}")
         
     
     def cfg_forward(self, latents, t, cond_embeds, guidance_scale):
@@ -412,7 +428,10 @@ def main(args):
     print("initializing model...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = SlerpKeyframeConditionedDiffusion().to(device)
-    
+    # Resume from checkpoint if provided
+    if args.resume_from:
+        model.load_state_dict(torch.load(args.resume_from))
+        print(f"Resumed training from {args.resume_from}")
     print("starting training...")
     model.train_model(train_loader, 
                       val_loader, 
@@ -446,5 +465,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs_adapter_only", type=int, default=3)
     parser.add_argument("--num_epochs_unfreeze_CA", type=int, default=2)
     parser.add_argument("--use_structure_loss", action='store_true')
+    parser.add_argument('--resume_from', type=str, default=None, 
+                    help='Path to checkpoint to resume training from')
     args = parser.parse_args()
     main(args)
