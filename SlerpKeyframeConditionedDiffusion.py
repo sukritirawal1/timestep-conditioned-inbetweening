@@ -472,9 +472,13 @@ def main(args):
 
     print("loading dataset and dataloader...")
     train_data = AnitaDataset("train", image_shape=(224, 224))
-    train_loader = DataLoader(train_data, batch_size=5, shuffle=True, num_workers=4)
+    train_loader = DataLoader(
+        train_data, batch_size=args.batch_size, shuffle=True, num_workers=4
+    )
     val_data = AnitaDataset("val", image_shape=(224, 224))
-    val_loader = DataLoader(val_data, batch_size=5, shuffle=True, num_workers=4)
+    val_loader = DataLoader(
+        val_data, batch_size=args.batch_size, shuffle=True, num_workers=4
+    )
 
     print("initializing model...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -525,5 +529,6 @@ if __name__ == "__main__":
     parser.add_argument("--use_structure_loss", action="store_true")
     parser.add_argument("--val_visualization_dir", type=str, default="val_viz")
     parser.add_argument("--model_path", type=str, default=None)
+    parser.add_argument("--batch_size", type=int, default=5)
     args = parser.parse_args()
     main(args)
