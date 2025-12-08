@@ -361,13 +361,13 @@ def main(args):
     print(f"Loaded {len(train_data)} train images from {args.data_dir}/train")
 
     train_loader = DataLoader(
-        train_data, batch_size=1, shuffle=True, num_workers=mp.cpu_count()
+        train_data, batch_size=8, shuffle=True, num_workers=mp.cpu_count()
     )
     print(f"Loaded {len(train_data)} train images from {args.data_dir}/train")
     val_data = AnitaDataset(os.path.join(args.data_dir, "val"), image_shape=(224, 224))
 
     val_loader = DataLoader(
-        val_data, batch_size=1, shuffle=True, num_workers=mp.cpu_count()
+        val_data, batch_size=8, shuffle=True, num_workers=mp.cpu_count()
     )
     print(f"Loaded {len(val_data)} val images from {args.data_dir}/val")
 
