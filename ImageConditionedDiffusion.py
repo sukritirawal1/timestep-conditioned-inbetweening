@@ -385,7 +385,7 @@ def main(args):
 
     model.train_model(
         train_loader,
-        train_loader,
+        val_loader,
         num_epochs=args.num_epochs,
         lr=1e-4,
         save_dir=args.save_dir,
