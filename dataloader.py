@@ -5,6 +5,7 @@ import math
 import torch
 from torchvision import transforms
 from torchvision.transforms import v2
+from PIL import Image
 
 
 class AnitaDataset(Dataset):
@@ -16,8 +17,16 @@ class AnitaDataset(Dataset):
         self.frame_sets = self._get_frame_sets()
         self.transform = transforms.Compose(
             [
-                # transforms.v2.ToDtype(torch.float32, scale=True),
-                transforms.Resize(image_shape, antialias=True),
+                transforms.ToTensor(),
+                transforms.Resize(
+                    (224, 224),
+                    interpolation=transforms.InterpolationMode.BICUBIC,
+                    antialias=False,
+                ),
+                transforms.Normalize(
+                    [0.48145466, 0.4578275, 0.40821073],
+                    [0.26862954, 0.26130258, 0.27577711],
+                ),
             ]
         )
 
@@ -56,14 +65,8 @@ class AnitaDataset(Dataset):
 
     def __getitem__(self, idx):
         frame_set = self.frame_sets[idx]
-        images = [
-            decode_image(frame_path, mode=ImageReadMode.RGB) for frame_path in frame_set
-        ]
-        images = [
-            v2.functional.to_dtype(image, torch.float32, scale=True) for image in images
-        ]
+        images = [Image.open(frame_path).convert("RGB") for frame_path in frame_set]
         images = [self.transform(image) for image in images]
-        images = [image.clamp(0.0, 1.0) for image in images]
         return {
             "anchor_start": images[0],
             "anchor_end": images[-1],
