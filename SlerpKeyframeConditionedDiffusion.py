@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from PIL import Image
 import matplotlib.pyplot as plt
 from pathlib import Path
+import math
 
 from dataloader import AnitaDataset
 from torch.utils.data import DataLoader
@@ -55,6 +56,20 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
         self.clip_projection = self.clip_model.visual_projection
         
+        # #experiment 1 time encoding
+        # self.time_mlp = nn.Sequential(     
+        #     nn.Linear(1, context_dim),
+        #     nn.SiLU(),
+        #     nn.Linear(context_dim, context_dim),
+        # )
+        
+        #experiment 1 time encoding: transformed inputs
+        self.time_mlp = nn.Sequential(     
+            nn.Linear(8, context_dim),
+            nn.SiLU(),
+            nn.Linear(context_dim, context_dim),
+        )
+        
         for param in self.clip_model.parameters():
             param.requires_grad = False
 
@@ -83,7 +98,29 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         
         return text_embeddings
     
-    
+    def encode_timestep(self, t):
+        """
+        t: tensor shaped [B, 1] or [1, 1], values in [0, 1]
+        Returns φ(t) shaped [B, 8]
+        """
+        # Ensure proper float type and device
+        t = t.to(self.device).float()
+
+        # Polynomial terms
+        t1 = t
+        t2 = t ** 2
+        t3 = t ** 3
+        t4 = t ** 4
+
+        # Fourier terms
+        sin1 = torch.sin(2 * math.pi * t)
+        cos1 = torch.cos(2 * math.pi * t)
+        sin2 = torch.sin(4 * math.pi * t)
+        cos2 = torch.cos(4 * math.pi * t)
+
+        # Concatenate into φ(t)
+        phi = torch.cat([t1, t2, t3, t4, sin1, cos1, sin2, cos2], dim=-1)  # [B, 8]
+        return phi
     def encode_image_to_latent(self, images):
         # if images.isinstance(list):
         #     pass
@@ -104,11 +141,6 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         return torch.zeros_like(cond)
     
     
-    # def encode_condition_CLIP(self, images):
-    #     inputs = self.clip_processor(images=images, return_tensors="pt").to(self.device)
-    #     with torch.no_grad():
-    #         outputs = self.clip_model(**inputs)
-    #         return outputs.image_embeds
     def encode_condition_CLIP(self, images):
         inputs = self.clip_processor(images=images, return_tensors="pt").to(self.device)
         with torch.no_grad():
@@ -170,11 +202,14 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         #     z_start = self.encode_image_to_latent(start_frames)
         #     z_end = self.encode_image_to_latent(end_frames)
         # cond = self.image_conditioner(z_start, z_end)
-        start_feat = self.encode_condition_CLIP(start_frames)
-        end_feat = self.encode_condition_CLIP(end_frames)
-        combined_feat = (1 - timestep) * start_feat + timestep * end_feat
-        keyframe_cond = self.visual_adapter(combined_feat)
-        return keyframe_cond
+        start_embed = self.encode_condition_CLIP(start_frames)
+        end_embed = self.encode_condition_CLIP(end_frames)
+        visual_feat = start_embed * (1 - timestep) + end_embed * timestep  # [B, P, 768]
+        timestep_tens = torch.tensor([[timestep]], device=self.device, dtype=torch.float32)
+        timestep_tens = self.encode_timestep(timestep_tens)  # [1, 8]
+        time_embed = self.time_mlp(timestep_tens).unsqueeze(0)  # [1,1, C]
+        full_feat = torch.cat([visual_feat, time_embed.repeat(visual_feat.shape[0],1,1)], dim=1)  # [B, P+1, C]  
+        return full_feat
     
     def training_step(self, batch, structure_loss = False):
         start = batch["anchor_start"].to(self.device)
@@ -300,14 +335,15 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
             plt.savefig(out_path)
             plt.close(fig)
     
-    def train_model(self, train_loader, val_loader, num_epochs = 5, lr = 1e-4, save_dir = "model_ckpt", noise_strength = 0.3, num_denoising_steps = 25, structure_loss  = False, guidance_scale = 1.0):
+    def train_model(self, train_loader, val_loader, num_epochs = 5, start_epoch = 5, lr = 1e-4, save_dir = "model_ckpt", noise_strength = 0.3, num_denoising_steps = 25, structure_loss  = False, guidance_scale = 1.0):
         optimizer = torch.optim.AdamW(self.parameters(), lr=lr)
         os.makedirs(save_dir, exist_ok=True)
         best_val_loss = float("inf")
         for epoch in range(num_epochs):
+            epoch = epoch + start_epoch
             self.train()
             train_loss = 0.0
-            for batch in tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{num_epochs}"):
+            for batch in tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{num_epochs+start_epoch}"):
                 # if i > 5:
                 #     break
                 optimizer.zero_grad()
@@ -349,6 +385,29 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         img = img_tensor.detach().cpu().clamp(0, 1)
         img = (img * 255).byte().permute(1, 2, 0).numpy()  # (H, W, 3)
         return Image.fromarray(img)
+    
+    def load_checkpoint(self, checkpoint_path):
+        """Load checkpoint into model"""
+        if os.path.exists(checkpoint_path):
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            # Handle different checkpoint formats
+            if isinstance(checkpoint, dict):
+                if 'state_dict' in checkpoint:
+                    self.load_state_dict(checkpoint['state_dict'], strict=False)
+                elif 'model_state_dict' in checkpoint:
+                    self.load_state_dict(checkpoint['model_state_dict'], strict=False)
+                else:
+                    self.load_state_dict(checkpoint, strict=False)
+            else:
+                self.load_state_dict(checkpoint, strict=False)
+            
+            # Ensure visual_adapter is on the correct device
+            if hasattr(self, 'visual_adapter'):
+                self.visual_adapter = self.visual_adapter.to(self.device)
+            
+            print(f"Loaded checkpoint from {checkpoint_path}")
+        else:
+            print(f"Warning: Checkpoint not found at {checkpoint_path}")
     
     @torch.no_grad()
     def predict_inbetween(self, start_frames, end_frames, num_inference_steps = 25, noise_strength = 0.3, timestep = 0.5, guidance_scale = 1.0):
@@ -409,7 +468,7 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
 
 def main(args):
     
-    print("patched clip3")
+    print("patched clip8")
     
     print("loading dataset and dataloader...")
     train_data = AnitaDataset("train", image_shape = (224,224))
@@ -420,6 +479,8 @@ def main(args):
     print("initializing model...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = SlerpKeyframeConditionedDiffusion(val_visualization_dir=args.val_visualization_dir).to(device)
+    if args.checkpoint_path is not None:
+        model.load_checkpoint(args.checkpoint_path)
     
     print("starting training...")
     # model.train_model(train_loader, 
@@ -435,15 +496,28 @@ def main(args):
         if 'attn2' in name:  #CA layers
             param.requires_grad = True
     
-    model.train_model(train_loader, 
-                      val_loader, 
-                      num_epochs=args.num_epochs_unfreeze_CA, 
-                      lr=1e-4, save_dir=args.save_dir, 
-                      noise_strength = args.noise_strength, 
-                      num_denoising_steps = args.num_denoising_steps, 
-                      structure_loss = args.use_structure_loss, 
-                      guidance_scale = args.guidance_scale)
+    # model.train_model(train_loader, 
+    #                   val_loader, 
+    #                   num_epochs=args.num_epochs_unfreeze_CA, 
+    #                   lr=1e-4, save_dir=args.save_dir, 
+    #                   noise_strength = args.noise_strength, 
+    #                   num_denoising_steps = args.num_denoising_steps, 
+    #                   structure_loss = args.use_structure_loss, 
+    #                   guidance_scale = args.guidance_scale)
     
+    # if args.unfreeze_unet:
+    #     for param in model.unet.parameters():
+    #             param.requires_grad = True
+                
+    model.train_model(train_loader, 
+                    val_loader, 
+                    num_epochs=args.num_epochs, 
+                    start_epoch= args.start_epoch,
+                    lr=1e-4, save_dir=args.save_dir, 
+                    noise_strength = args.noise_strength, 
+                    num_denoising_steps = args.num_denoising_steps, 
+                    structure_loss = args.use_structure_loss, 
+                    guidance_scale = args.guidance_scale)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Diffusion-Baseline-Inbetweening")
@@ -451,9 +525,15 @@ if __name__ == "__main__":
     parser.add_argument("--num_denoising_steps", type=int, default=25)
     parser.add_argument("--guidance_scale", type=float, default=1.0)
     parser.add_argument("--noise_strength", type=float, default=0.3)
-    parser.add_argument("--num_epochs_adapter_only", type=int, default=3)
-    parser.add_argument("--num_epochs_unfreeze_CA", type=int, default=2)
+    # parser.add_argument("--num_epochs_adapter_only", type=int, default=3)
+    # parser.add_argument("--num_epochs_unfreeze_CA", type=int, default=2)
+    parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--use_structure_loss", action='store_true')
     parser.add_argument("--val_visualization_dir", type=str, default="val_viz")
+    parser.add_argument("--checkpoint_path", type=str, default=None,
+                        help="Path to model checkpoint to load")
+    parser.add_argument("--unfreeze_unet", action='store_true',
+                        help="Unfreeze entire UNet for final fine-tuning")
+    parser.add_argument("--start_epoch", type=int, default=0)
     args = parser.parse_args()
     main(args)
