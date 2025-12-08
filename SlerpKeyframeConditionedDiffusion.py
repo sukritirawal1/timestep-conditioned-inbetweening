@@ -16,8 +16,8 @@ from dataloader import AnitaDataset
 from torch.utils.data import DataLoader
 import argparse
 import gc
-
-from transformers import CLIPVisionModelWithProjection, CLIPProcessor
+from optical_flow import OpticalFlow  # Add this line at top with other imports
+# from transformers import CLIPVisionModelWithProjection, CLIPProcessor
 
 
 class SlerpKeyframeConditionedDiffusion(nn.Module):
@@ -51,7 +51,31 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
         self.prompt = "a clean cartoon animation frame"
         self.text_embeds = self._get_text_embeds(self.prompt)
 
+        # context_dim = self.unet.config.cross_attention_dim
+        # self.visual_adapter = nn.Sequential(
+        #     nn.Linear(768, context_dim),
+        #     nn.LayerNorm(context_dim),
+        #     nn.ReLU(),
+        #     nn.Linear(context_dim, context_dim),
+        # )
+
+        # self.clip_model = CLIPVisionModelWithProjection.from_pretrained(
+        #     "openai/clip-vit-large-patch14"
+        # ).to(self.device)
+        # self.clip_processor = CLIPProcessor.from_pretrained(
+        #     "openai/clip-vit-large-patch14"
+        # )
+        # self.clip_projection = self.clip_model.visual_projection
+
+        # for param in self.clip_model.parameters():
+        #     param.requires_grad = False
+
+        # self.clip_model.eval()
         context_dim = self.unet.config.cross_attention_dim
+
+        # Optical flow projection layers
+        self.flow_input_proj = nn.Linear(4, 768)
+
         self.visual_adapter = nn.Sequential(
             nn.Linear(768, context_dim),
             nn.LayerNorm(context_dim),
@@ -59,19 +83,8 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
             nn.Linear(context_dim, context_dim),
         )
 
-        self.clip_model = CLIPVisionModelWithProjection.from_pretrained(
-            "openai/clip-vit-large-patch14"
-        ).to(self.device)
-        self.clip_processor = CLIPProcessor.from_pretrained(
-            "openai/clip-vit-large-patch14"
-        )
-        self.clip_projection = self.clip_model.visual_projection
-
-        for param in self.clip_model.parameters():
-            param.requires_grad = False
-
-        self.clip_model.eval()
-
+        # Initialize optical flow
+        self.optical_flow = OpticalFlow()
         self.safety_checker = None
         self.pipe = pipe
 
@@ -174,17 +187,50 @@ class SlerpKeyframeConditionedDiffusion(nn.Module):
             v2[non_linear_mask] = s0.unsqueeze(1) * v0_nl + s1.unsqueeze(1) * v1_nl
 
         return v2.reshape_as(z0)
-
     def get_keyframe_condition(self, start_frames, end_frames, timestep=0.5):
-        # with torch.no_grad():
-        #     z_start = self.encode_image_to_latent(start_frames)
-        #     z_end = self.encode_image_to_latent(end_frames)
-        # cond = self.image_conditioner(z_start, z_end)
-        start_feat = self.encode_condition_CLIP(start_frames)
-        end_feat = self.encode_condition_CLIP(end_frames)
-        combined_feat = (1 - timestep) * start_feat + timestep * end_feat
-        keyframe_cond = self.visual_adapter(combined_feat)
+        """
+        Generate optical flow-based conditioning instead of CLIP features.
+        """
+        batch_size = start_frames.shape[0] if start_frames.ndim == 4 else 1
+        
+        # Generate optical flow interpolations for each sample in batch
+        flow_frames = []
+        if start_frames.ndim == 3:
+            start_frames = start_frames.unsqueeze(0)
+            end_frames = end_frames.unsqueeze(0)
+        
+        for i in range(batch_size):
+            flow_frame = self.optical_flow.interpolate(
+                start_frames[i], 
+                end_frames[i], 
+                t=timestep
+            )
+            flow_frames.append(flow_frame)
+        
+        flow_batch = torch.stack(flow_frames).to(self.device)
+        
+        # Encode optical flow frame to get spatial features via VAE
+        with torch.no_grad():
+            flow_latents = self.encode_image_to_latent(flow_batch)
+            # Reshape latents to patch-like features: [B, 4, H, W] -> [B, num_patches, 4]
+            B, C, H, W = flow_latents.shape
+            flow_features = flow_latents.view(B, C, H * W).permute(0, 2, 1)  # [B, H*W, 4]
+        
+        # Project from 4 channels to 768 to match visual_adapter input
+        flow_features = self.flow_input_proj(flow_features)  # [B, H*W, 768]
+        keyframe_cond = self.visual_adapter(flow_features)    # [B, H*W, context_dim]
+        
         return keyframe_cond
+    # def get_keyframe_condition(self, start_frames, end_frames, timestep=0.5):
+    #     # with torch.no_grad():
+    #     #     z_start = self.encode_image_to_latent(start_frames)
+    #     #     z_end = self.encode_image_to_latent(end_frames)
+    #     # cond = self.image_conditioner(z_start, z_end)
+    #     start_feat = self.encode_condition_CLIP(start_frames)
+    #     end_feat = self.encode_condition_CLIP(end_frames)
+    #     combined_feat = (1 - timestep) * start_feat + timestep * end_feat
+    #     keyframe_cond = self.visual_adapter(combined_feat)
+    #     return keyframe_cond
 
     def training_step(self, batch, structure_loss=False):
         start = batch["anchor_start"].to(self.device)
@@ -506,6 +552,13 @@ def main(args):
     for name, param in model.unet.named_parameters():
         if "attn2" in name:  # CA layers
             param.requires_grad = True
+    for name, param in model.unet.named_parameters():
+        if "attn2" in name:
+            param.requires_grad = True
+
+# ADD THIS:
+for param in model.flow_input_proj.parameters():
+    param.requires_grad = True
 
     model.train_model(
         train_loader,
