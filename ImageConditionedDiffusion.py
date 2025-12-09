@@ -48,6 +48,8 @@ class ImageConditionedDiffusion(nn.Module):
         self.image_encoder = pipe.image_encoder
         self.image_processor = pipe.image_processor
 
+
+        register_weighted_attn_hooks(self)
     def slerp(self, z0, z1, alpha, dot_threshold=0.9995):
         # flatten
         v0 = z0.reshape(z0.shape[0], -1)
@@ -104,6 +106,7 @@ class ImageConditionedDiffusion(nn.Module):
 
     def encode_condition_CLIP(self, images):
         return self.image_encoder(images).image_embeds
+        
 
     def generate_condition_image(self, start_frames, end_frames, timestep=0.5):
         images = self.slerp(start_frames, end_frames, timestep)
@@ -137,6 +140,15 @@ class ImageConditionedDiffusion(nn.Module):
 
         noise = torch.randn_like(z_target)
         zt_noisy = self.scheduler.add_noise(z_target, noise, t)
+        start_embed = self.encode_condition_CLIP(start)
+        end_embed = self.encode_condition_CLIP(end)
+        t_scalar = torch.tensor(timestep, device=self.device)
+
+        self._hook_cache = {
+            "start_embed": start_embed.unsqueeze(1),
+            "end_embed": end_embed.unsqueeze(1),
+            "t_scalar": t_scalar,
+        }
 
         noise_pred = self.unet(
             zt_noisy,
@@ -145,7 +157,7 @@ class ImageConditionedDiffusion(nn.Module):
         ).sample
 
         loss = F.mse_loss(noise_pred, noise)
-
+        self._hook_cache = None
         return loss
 
     def val_metrics(
@@ -323,10 +335,21 @@ class ImageConditionedDiffusion(nn.Module):
         timestep=0.5,
         guidance_scale=1.0,
     ):
+        start_embed = self.encode_condition_CLIP(start_frames)
+        end_embed = self.encode_condition_CLIP(end_frames)
+        t_scalar = torch.tensor(timestep, device=self.device)
+        
+        self._hook_cache = {
+            "start_embed": start_embed.unsqueeze(1),
+            "end_embed": end_embed.unsqueeze(1),
+            "t_scalar": t_scalar,
+        }
+        
         condition = self.generate_condition_image(
             start_frames, end_frames, timestep=timestep
         )
         images = self.pipe(condition, guidance_scale=guidance_scale)
+        self._hook_cache = None
         return images["images"]
 
     def predict_inbetween_sequence(
@@ -349,6 +372,28 @@ class ImageConditionedDiffusion(nn.Module):
         # OUTPUT FORMAT: LIST OF LISTS WITH FIRST DIM FRAME_INDEX, SECOND DIM BATCH_INDEX
         return inbetween_frames
 
+def register_weighted_attn_hooks(parent_model):
+    def make_hook(attn_module):
+        def hook(module, input, output):
+            h = input[0]
+            t = parent_model._hook_cache["t_scalar"]
+            s_emb = parent_model._hook_cache["start_embed"]
+            e_emb = parent_model._hook_cache["end_embed"]
+
+            # Call forward directly to avoid hook recursion
+            out_start = attn_module.forward(h, encoder_hidden_states=s_emb)
+            torch.cuda.empty_cache()
+            out_end = attn_module.forward(h, encoder_hidden_states=e_emb)
+            torch.cuda.empty_cache()
+            return (1 - t) * out_start + t * out_end
+            
+        return hook
+
+    for name, module in parent_model.unet.named_modules():
+        
+        #print(name)
+        if (name.endswith(".attn2")):
+            module.register_forward_hook(make_hook(module))
 
 def main(args):
 
@@ -361,19 +406,28 @@ def main(args):
     print(f"Loaded {len(train_data)} train images from {args.data_dir}/train")
 
     train_loader = DataLoader(
-        train_data, batch_size=8, shuffle=True, num_workers=mp.cpu_count()
+        train_data, batch_size=args.batch_size, shuffle=True, num_workers=mp.cpu_count()
     )
     print(f"Loaded {len(train_data)} train images from {args.data_dir}/train")
     val_data = AnitaDataset(os.path.join(args.data_dir, "val"), image_shape=(224, 224))
 
     val_loader = DataLoader(
-        val_data, batch_size=8, shuffle=True, num_workers=mp.cpu_count()
+        val_data, batch_size=args.batch_size, shuffle=True, num_workers=mp.cpu_count()
     )
     print(f"Loaded {len(val_data)} val images from {args.data_dir}/val")
 
     print("initializing model...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = ImageConditionedDiffusion(save_dir=args.save_dir).to(device)
+
+    if args.checkpoint:
+        print(f"Loading checkpoint from {args.checkpoint}")
+        checkpoint = torch.load(args.checkpoint, map_location=device) 
+        if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['state_dict'], strict=False)
+        else:
+            model.load_state_dict(checkpoint, strict=False)
+        print("Checkpoint loaded successfully!")
 
     print("starting training...")
 
@@ -405,5 +459,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs", type=int, default=25)
     parser.add_argument("--use_structure_loss", action="store_true")
     parser.add_argument("--data_dir", type=str, default=".")
+    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--batch_size", type=int, default=8)
+    
     args = parser.parse_args()
     main(args)
