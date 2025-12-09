@@ -122,7 +122,8 @@ class ImageConditionedDiffusion(nn.Module):
         # imgs = images.detach().cpu().permute(0, 2, 3, 1).numpy()
         feats = self.feature_extractor(images=images, return_tensors="pt").pixel_values
         feats = feats.to(self.device, dtype=self.image_encoder.dtype)
-        return self.image_encoder(pixel_values=feats).image_embeds
+        # (B, seqlen+1, 768)
+        return self.image_encoder(pixel_values=feats).last_hidden_state
         # return self.image_encoder(images).image_embeds
 
     def generate_condition_image(self, start_frames, end_frames, timestep=0.5):
@@ -133,10 +134,10 @@ class ImageConditionedDiffusion(nn.Module):
         start_emb = self.encode_condition_CLIP(start_frames)
         end_emb = self.encode_condition_CLIP(end_frames)
         # slerped_images = self.slerp(start_frames, end_frames, timestep)
-        # both = torch.cat([start_emb, end_emb], dim=1) # (B, 1536)
+        both = torch.cat([start_emb, end_emb], dim=1)  # (B, 1536)
         # cond = self.visual_adapter(both) # (B, context_dim(768))
-        cond = (1 - timestep) * start_emb + timestep * end_emb
-        return cond.unsqueeze(1)
+        # cond = (1 - timestep) * start_emb + timestep * end_emb
+        return both
 
     def training_step(self, batch, structure_loss=False):
         start = batch["anchor_start"].to(self.device)
