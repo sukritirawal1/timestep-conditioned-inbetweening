@@ -125,7 +125,10 @@ class ImageConditionedDiffusion(nn.Module):
         feats = self.feature_extractor(images=images, return_tensors="pt").pixel_values
         feats = feats.to(self.device, dtype=self.image_encoder.dtype)
         # (B, seqlen+1, 768)
-        return self.image_encoder(pixel_values=feats).last_hidden_state
+        hidden_states = self.image_encoder(pixel_values=feats).last_hidden_state
+        return self.image_encoder.visual_projection(hidden_states)
+
+        # return hidden_states # (B, seqlen, 768)
         # return self.image_encoder(images).image_embeds
 
     def generate_condition_image(self, start_frames, end_frames, timestep=0.5):
