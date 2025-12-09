@@ -120,7 +120,7 @@ class ImageConditionedDiffusion(nn.Module):
 
     def encode_condition_CLIP(self, images):
         # imgs = images.detach().cpu().permute(0, 2, 3, 1).numpy()
-        feats = self.feature_extractor(images=imgs, return_tensors="pt").pixel_values
+        feats = self.feature_extractor(images=images, return_tensors="pt").pixel_values
         feats = feats.to(self.device, dtype=self.image_encoder.dtype)
         return self.image_encoder(pixel_values=feats).image_embeds
         # return self.image_encoder(images).image_embeds
