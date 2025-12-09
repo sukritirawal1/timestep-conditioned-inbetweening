@@ -46,7 +46,10 @@ class ImageConditionedDiffusion(nn.Module):
         self.scheduler = pipe.scheduler
         self.vae = pipe.vae
         self.image_encoder = pipe.image_encoder
+        self.clip_projection = self.image_encoder.visual_projection
         self.feature_extractor = pipe.feature_extractor
+        self.feature_extractor.do_rescale = False
+        
         self.image_processor = pipe.image_processor
         
         for param in self.image_encoder.parameters():
@@ -119,10 +122,12 @@ class ImageConditionedDiffusion(nn.Module):
         return latents
 
     def encode_condition_CLIP(self, images):
-        imgs = images.detach().cpu().permute(0, 2, 3, 1).numpy()
-        feats = self.feature_extractor(images=imgs, return_tensors="pt").pixel_values
+        # imgs = images.detach().cpu().permute(0, 2, 3, 1).numpy()
+        feats = self.feature_extractor(images=images, return_tensors="pt").pixel_values
         feats = feats.to(self.device, dtype=self.image_encoder.dtype)
-        return self.image_encoder(pixel_values=feats).image_embeds
+        hidden = self.image_encoder(pixel_values=feats).last_hidden_state
+        return self.clip_projection(hidden)
+        
         # return self.image_encoder(images).image_embeds
 
     def generate_condition_image(self, start_frames, end_frames, timestep=0.5):
@@ -133,10 +138,10 @@ class ImageConditionedDiffusion(nn.Module):
         start_emb = self.encode_condition_CLIP(start_frames)
         end_emb = self.encode_condition_CLIP(end_frames)
         # slerped_images = self.slerp(start_frames, end_frames, timestep)
-        # both = torch.cat([start_emb, end_emb], dim=1) # (B, 1536)
+        both = torch.cat([start_emb, end_emb], dim=1) # (B, 2*(P+1), 768)
         # cond = self.visual_adapter(both) # (B, context_dim(768))
-        cond = (1 - timestep) * start_emb + timestep * end_emb
-        return cond.unsqueeze(1)      
+        # cond = (1 - timestep) * start_emb + timestep * end_emb
+        return both   
         
     def training_step(self, batch, structure_loss=False):
         start = batch["anchor_start"].to(self.device)
@@ -146,7 +151,7 @@ class ImageConditionedDiffusion(nn.Module):
         idx = np.random.randint(0, targets.shape[1])
         timestep = (idx + 1) / (targets.shape[1] + 1)
         target = targets[:, idx, :, :, :]
-
+        
         with torch.no_grad():
             z_target = self.encode_image_to_latent(target)
             condition = self.generate_condition_embeds(start, end, timestep=timestep)
@@ -352,6 +357,7 @@ class ImageConditionedDiffusion(nn.Module):
         timestep=0.5,
         num_inference_steps = 25,
         guidance_scale=1.0,
+        noise_strength = 0.25
     ):  
         
         cond_embeds = self.generate_condition_embeds(
@@ -359,6 +365,8 @@ class ImageConditionedDiffusion(nn.Module):
         )
         
         self.scheduler.set_timesteps(num_inference_steps, device=self.device)
+        
+    
         latents = torch.randn(
             (start_frames.shape[0], self.unet.in_channels, 64, 64),  # 64x64 for SD v1
             device=self.device,
@@ -373,7 +381,7 @@ class ImageConditionedDiffusion(nn.Module):
             ).sample
             
             latents = self.scheduler.step(noise_pred, t, latents).prev_sample
-            
+       
         images = self.decode_latent_to_image(latents)
         
         return images
@@ -387,6 +395,7 @@ class ImageConditionedDiffusion(nn.Module):
         num_inbetweens=3,
         num_denoising_steps = 25,
         guidance_scale=1.0,
+        noise_strength=0.25
     ):
         inbetween_frames = []
         timesteps = [(i + 1) / (num_inbetweens + 1) for i in range(num_inbetweens)]
@@ -397,6 +406,7 @@ class ImageConditionedDiffusion(nn.Module):
                 timestep=x,
                 num_inference_steps=num_denoising_steps,
                 guidance_scale=guidance_scale,
+                noise_strength=noise_strength
             )
             inbetween_frames.append(imgs)
         # OUTPUT FORMAT: LIST OF LISTS WITH FIRST DIM FRAME_INDEX, SECOND DIM BATCH_INDEX
@@ -405,7 +415,8 @@ class ImageConditionedDiffusion(nn.Module):
 
 def main(args):
 
-    print("Image Conditioned Diffusion6")
+    print("Image Conditioned Diffusion8")
+    
 
     print("loading dataset and dataloader...")
     train_data = AnitaDataset(
