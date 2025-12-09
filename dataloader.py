@@ -15,13 +15,14 @@ class AnitaDataset(Dataset):
         self.step = max(1, math.ceil(between_frames / 2))
 
         self.frame_sets = self._get_frame_sets()
+        print("Updated transform")
         self.transform = transforms.Compose(
             [
                 transforms.ToTensor(),
                 transforms.Resize(
                     (224, 224),
-                    interpolation=transforms.InterpolationMode.BICUBIC,
-                    antialias=False,
+                    # interpolation=transforms.InterpolationMode.BICUBIC,
+                    # antialias=False,
                 ),
                 # transforms.Normalize(
                 #     [0.48145466, 0.4578275, 0.40821073],
