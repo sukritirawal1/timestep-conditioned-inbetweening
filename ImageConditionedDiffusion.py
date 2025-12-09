@@ -47,6 +47,7 @@ class ImageConditionedDiffusion(nn.Module):
         self.vae = pipe.vae
         self.image_encoder = pipe.image_encoder
         self.feature_extractor = pipe.feature_extractor
+        self.feature_extractor.do_rescale = False
         self.image_processor = pipe.image_processor
 
         for param in self.image_encoder.parameters():
