@@ -168,10 +168,8 @@ class ImageConditionedDiffusion(nn.Module):
         # slerped_images = self.slerp(start_frames, end_frames, timestep)
         # both = torch.cat([start_emb, end_emb], dim=1) # (B, 2*(P+1), 768)
         # cond = self.visual_adapter(both) # (B, context_dim(768))
-        timestep_tens = torch.tensor(
-            timestep, device=self.device, dtype=torch.float32
-        ).unsqueeze(0)
-        timestep_tens = self.encode_timestep(timestep)  # [1, 8]
+        timestep_tens = torch.tensor(timestep, device=self.device).unsqueeze(0)
+        timestep_tens = self.encode_timestep(timestep_tens)  # [1, 8]
         time_embed = self.time_mlp(timestep_tens).unsqueeze(0)  # [1,1, C]
         visual_feat = (1 - timestep) * start_emb + timestep * end_emb
         full_feat = torch.cat(
