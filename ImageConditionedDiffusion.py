@@ -48,18 +48,18 @@ class ImageConditionedDiffusion(nn.Module):
         self.image_encoder = pipe.image_encoder
         self.feature_extractor = pipe.feature_extractor
         self.image_processor = pipe.image_processor
-        
+
         for param in self.image_encoder.parameters():
             param.requires_grad = False
         for param in self.unet.parameters():
             param.requires_grad = False
         for param in self.vae.parameters():
             param.requires_grad = False
-            
+
         context_dim = self.unet.config.cross_attention_dim
         self.visual_adapter = nn.Sequential(
             nn.Linear(768 * 2, context_dim),
-            nn.SiLU(), 
+            nn.SiLU(),
             nn.LayerNorm(context_dim),
             nn.Linear(context_dim, context_dim),
         )
@@ -119,7 +119,7 @@ class ImageConditionedDiffusion(nn.Module):
         return latents
 
     def encode_condition_CLIP(self, images):
-        imgs = images.detach().cpu().permute(0, 2, 3, 1).numpy()
+        # imgs = images.detach().cpu().permute(0, 2, 3, 1).numpy()
         feats = self.feature_extractor(images=imgs, return_tensors="pt").pixel_values
         feats = feats.to(self.device, dtype=self.image_encoder.dtype)
         return self.image_encoder(pixel_values=feats).image_embeds
@@ -136,8 +136,8 @@ class ImageConditionedDiffusion(nn.Module):
         # both = torch.cat([start_emb, end_emb], dim=1) # (B, 1536)
         # cond = self.visual_adapter(both) # (B, context_dim(768))
         cond = (1 - timestep) * start_emb + timestep * end_emb
-        return cond.unsqueeze(1)      
-        
+        return cond.unsqueeze(1)
+
     def training_step(self, batch, structure_loss=False):
         start = batch["anchor_start"].to(self.device)
         end = batch["anchor_end"].to(self.device)
@@ -190,7 +190,7 @@ class ImageConditionedDiffusion(nn.Module):
                         batch["anchor_start"].to(self.device),
                         batch["anchor_end"].to(self.device),
                         num_inbetweens=batch["targets"].shape[1],
-                        num_denoising_steps = num_inference_steps,
+                        num_denoising_steps=num_inference_steps,
                         guidance_scale=guidance_scale,
                     )
                     self.visualize_inbetweens(batch, pred_seq, epoch)
@@ -290,7 +290,7 @@ class ImageConditionedDiffusion(nn.Module):
                 loss.backward()
                 optimizer.step()
                 train_loss += loss.item()
-                i+=1
+                i += 1
             torch.cuda.empty_cache()
             gc.collect()
             avg_train_loss = train_loss / len(train_loader)
@@ -334,10 +334,10 @@ class ImageConditionedDiffusion(nn.Module):
         img = img_tensor.detach().cpu().clamp(0, 1)
         img = (img * 255).byte().permute(1, 2, 0).numpy()  # (H, W, 3)
         return Image.fromarray(img)
-    
+
     def decode_latent_to_image(self, latent):
         with torch.no_grad():
-            latents = latent/self.vae.config.scaling_factor
+            latents = latent / self.vae.config.scaling_factor
             img = self.vae.decode(latents).sample
         img = (img / 2 + 0.5).clamp(0, 1)
         img = img.cpu().permute(0, 2, 3, 1).numpy()
@@ -350,42 +350,40 @@ class ImageConditionedDiffusion(nn.Module):
         start_frames,
         end_frames,
         timestep=0.5,
-        num_inference_steps = 25,
+        num_inference_steps=25,
         guidance_scale=1.0,
-    ):  
-        
+    ):
+
         cond_embeds = self.generate_condition_embeds(
             start_frames, end_frames, timestep=timestep
         )
-        
+
         self.scheduler.set_timesteps(num_inference_steps, device=self.device)
         latents = torch.randn(
             (start_frames.shape[0], self.unet.in_channels, 64, 64),  # 64x64 for SD v1
             device=self.device,
             dtype=self.vae.dtype,
         )
-        
+
         for t in self.scheduler.timesteps:
             noise_pred = self.unet(
                 latents,
                 t,
                 encoder_hidden_states=cond_embeds,
             ).sample
-            
+
             latents = self.scheduler.step(noise_pred, t, latents).prev_sample
-            
+
         images = self.decode_latent_to_image(latents)
-        
+
         return images
-        
-        
 
     def predict_inbetween_sequence(
         self,
         start_frames,
         end_frames,
         num_inbetweens=3,
-        num_denoising_steps = 25,
+        num_denoising_steps=25,
         guidance_scale=1.0,
     ):
         inbetween_frames = []
