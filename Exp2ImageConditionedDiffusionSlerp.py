@@ -171,7 +171,7 @@ class ImageConditionedDiffusion(nn.Module):
         timestep_tens = torch.tensor(timestep, device=self.device).unsqueeze(0)
         timestep_tens = self.encode_timestep(timestep_tens)  # [1, 8]
         time_embed = self.time_mlp(timestep_tens).unsqueeze(0)  # [1,1, C]
-        visual_feat = (1 - timestep) * start_emb + timestep * end_emb
+        visual_feat = ((1 - timestep) * start_emb + timestep * end_emb).unsqueeze(1)
         full_feat = torch.cat(
             [visual_feat, time_embed.repeat(visual_feat.shape[0], 1, 1)], dim=1
         )
