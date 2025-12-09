@@ -121,6 +121,7 @@ class ImageConditionedDiffusion(nn.Module):
 
     def encode_condition_CLIP(self, images):
         # imgs = images.detach().cpu().permute(0, 2, 3, 1).numpy()
+        images = torch.clamp(images, 0, 1)
         feats = self.feature_extractor(images=images, return_tensors="pt").pixel_values
         feats = feats.to(self.device, dtype=self.image_encoder.dtype)
         # (B, seqlen+1, 768)
