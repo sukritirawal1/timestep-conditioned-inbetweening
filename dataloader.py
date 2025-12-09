@@ -68,7 +68,7 @@ class AnitaDataset(Dataset):
         frame_set = self.frame_sets[idx]
         images = [Image.open(frame_path).convert("RGB") for frame_path in frame_set]
         images = [self.transform(image) for image in images]
-        images = torch.clamp(images, 0, 1)
+        images = [torch.clamp(image, 0, 1) for image in images]
         return {
             "anchor_start": images[0],
             "anchor_end": images[-1],
