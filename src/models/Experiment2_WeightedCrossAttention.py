@@ -11,16 +11,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 import matplotlib.pyplot as plt
-import math
 
-from dataset import AnitaDataset
+from src.dataset import AnitaDataset
 from torch.utils.data import DataLoader
 import argparse
 import multiprocessing as mp
 import gc
 
 
-class TimeEncodingDiffusionModel(nn.Module):
+class ImageConditionedDiffusion(nn.Module):
     def __init__(
         self,
         model_name="lambdalabs/sd-image-variations-diffusers",
@@ -43,31 +42,9 @@ class TimeEncodingDiffusionModel(nn.Module):
         self.scheduler = pipe.scheduler
         self.vae = pipe.vae
         self.image_encoder = pipe.image_encoder
-        self.feature_extractor = pipe.feature_extractor
-        self.feature_extractor.do_rescale = False
-
         self.image_processor = pipe.image_processor
 
-        for param in self.image_encoder.parameters():
-            param.requires_grad = False
-        for param in self.unet.parameters():
-            param.requires_grad = False
-        for param in self.vae.parameters():
-            param.requires_grad = False
-
-        context_dim = self.unet.config.cross_attention_dim
-        self.visual_adapter = nn.Sequential(
-            nn.Linear(768 * 2, context_dim),
-            nn.SiLU(),
-            nn.LayerNorm(context_dim),
-            nn.Linear(context_dim, context_dim),
-        )
-
-        self.time_mlp = nn.Sequential(
-            nn.Linear(8, context_dim),
-            nn.SiLU(),
-            nn.Linear(context_dim, context_dim),
-        )
+        register_weighted_attn_hooks(self)
 
     def slerp(self, z0, z1, alpha, dot_threshold=0.9995):
         # flatten
@@ -107,25 +84,6 @@ class TimeEncodingDiffusionModel(nn.Module):
 
         return v2.reshape_as(z0)
 
-    def encode_timestep(self, t):
-        t = t.to(self.device).float()
-
-        # Polynomial terms
-        t1 = t
-        t2 = t**2
-        t3 = t**3
-        t4 = t**4
-
-        # Fourier terms
-        sin1 = torch.sin(2 * math.pi * t)
-        cos1 = torch.cos(2 * math.pi * t)
-        sin2 = torch.sin(4 * math.pi * t)
-        cos2 = torch.cos(4 * math.pi * t)
-
-        # concat
-        phi = torch.cat([t1, t2, t3, t4, sin1, cos1, sin2, cos2], dim=-1)  # [B, 8]
-        return phi
-
     def encode_image_to_latent(self, images):
         # if images.isinstance(list):
         #     pass
@@ -143,29 +101,18 @@ class TimeEncodingDiffusionModel(nn.Module):
         return latents
 
     def encode_condition_CLIP(self, images):
-        # imgs = images.detach().cpu().permute(0, 2, 3, 1).numpy()
-        feats = self.feature_extractor(images=images, return_tensors="pt").pixel_values
-        feats = feats.to(self.device, dtype=self.image_encoder.dtype)
-        return self.image_encoder(pixel_values=feats).image_embeds
-        # return self.image_encoder(images).image_embeds
+        return self.image_encoder(images).image_embeds
 
     def generate_condition_image(self, start_frames, end_frames, timestep=0.5):
         images = self.slerp(start_frames, end_frames, timestep)
         return images
 
     def generate_condition_embeds(self, start_frames, end_frames, timestep=0.5):
-        start_emb = self.encode_condition_CLIP(start_frames)
-        end_emb = self.encode_condition_CLIP(end_frames)
-        # slerped_images = self.slerp(start_frames, end_frames, timestep)
-        # both = torch.cat([start_emb, end_emb], dim=1) # (B, 2*(P+1), 768)
-        # cond = self.visual_adapter(both) # (B, context_dim(768))
-        timestep_tens = self.encode_timestep(timestep_tens)  # [1, 8]
-        time_embed = self.time_mlp(timestep_tens).unsqueeze(0)  # [1,1, C]
-        visual_feat = (1 - timestep) * start_emb + timestep * end_emb
-        full_feat = torch.cat(
-            [visual_feat, time_embed.repeat(visual_feat.shape[0], 1, 1)], dim=1
-        )
-        return full_feat
+        # start_emb = self.encode_condition_CLIP(start_frames)
+        # end_emb = self.encode_condition_CLIP(end_frames)
+        slerped_images = self.slerp(start_frames, end_frames, timestep)
+        embeds = self.encode_condition_CLIP(slerped_images).unsqueeze(1)
+        return embeds
 
     def training_step(self, batch, structure_loss=False):
         start = batch["anchor_start"].to(self.device)
@@ -188,6 +135,15 @@ class TimeEncodingDiffusionModel(nn.Module):
 
         noise = torch.randn_like(z_target)
         zt_noisy = self.scheduler.add_noise(z_target, noise, t)
+        start_embed = self.encode_condition_CLIP(start)
+        end_embed = self.encode_condition_CLIP(end)
+        t_scalar = torch.tensor(timestep, device=self.device)
+
+        self._hook_cache = {
+            "start_embed": start_embed.unsqueeze(1),
+            "end_embed": end_embed.unsqueeze(1),
+            "t_scalar": t_scalar,
+        }
 
         noise_pred = self.unet(
             zt_noisy,
@@ -196,7 +152,7 @@ class TimeEncodingDiffusionModel(nn.Module):
         ).sample
 
         loss = F.mse_loss(noise_pred, noise)
-
+        self._hook_cache = None
         return loss
 
     def val_metrics(
@@ -205,7 +161,7 @@ class TimeEncodingDiffusionModel(nn.Module):
         epoch,
         guidance_scale=1.0,
         noise_strength=0.3,
-        num_inference_steps=50,
+        num_inference_steps=25,
         structure_loss=False,
     ):
         self.eval()
@@ -219,7 +175,6 @@ class TimeEncodingDiffusionModel(nn.Module):
                         batch["anchor_start"].to(self.device),
                         batch["anchor_end"].to(self.device),
                         num_inbetweens=batch["targets"].shape[1],
-                        num_denoising_steps=num_inference_steps,
                         guidance_scale=guidance_scale,
                     )
                     self.visualize_inbetweens(batch, pred_seq, epoch)
@@ -308,18 +263,16 @@ class TimeEncodingDiffusionModel(nn.Module):
         for epoch in range(num_epochs):
             self.train()
             train_loss = 0.0
-            i = 0
             for batch in tqdm(
                 train_loader, desc=f"Training Epoch {epoch+1}/{num_epochs}"
             ):
-                # if i > 3:
+                # if i > 5:
                 #     break
                 optimizer.zero_grad()
                 loss = self.training_step(batch, structure_loss=structure_loss)
                 loss.backward()
                 optimizer.step()
                 train_loss += loss.item()
-                i += 1
             torch.cuda.empty_cache()
             gc.collect()
             avg_train_loss = train_loss / len(train_loader)
@@ -337,13 +290,6 @@ class TimeEncodingDiffusionModel(nn.Module):
                 torch.save(
                     self.state_dict(),
                     os.path.join(save_dir, "model_ckpt", f"best_model.pth"),
-                )
-
-            if (epoch + 1) % 5 == 0:
-                best_val_loss = val_loss
-                torch.save(
-                    self.state_dict(),
-                    os.path.join(save_dir, "model_ckpt", f"epoch_{epoch+1}.pth"),
                 )
 
     def cfg_forward(self, latents, t, cond_embeds, guidance_scale):
@@ -367,18 +313,14 @@ class TimeEncodingDiffusionModel(nn.Module):
 
     @staticmethod
     def _tensor_to_pil(img_tensor):
-        img = img_tensor.detach().cpu().clamp(0, 1)
-        img = (img * 255).byte().permute(1, 2, 0).numpy()  # (H, W, 3)
+        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073]).view(3, 1, 1)
+        std = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(3, 1, 1)
+        img = img_tensor.detach().cpu()
+        if img.shape[0] != 3 and img.shape[-1] == 3:
+            img = img.permute(2, 0, 1)  # if anything is HWC
+        img = (img * std + mean).clamp(0, 1)
+        img = (img * 255).byte().permute(1, 2, 0).numpy()
         return Image.fromarray(img)
-
-    def decode_latent_to_image(self, latent):
-        with torch.no_grad():
-            latents = latent / self.vae.config.scaling_factor
-            img = self.vae.decode(latents).sample
-        img = (img / 2 + 0.5).clamp(0, 1)
-        img = img.cpu().permute(0, 2, 3, 1).numpy()
-        img = (img * 255).round().astype("uint8")
-        return [Image.fromarray(image) for image in img]
 
     @torch.no_grad()
     def predict_inbetween(
@@ -386,66 +328,31 @@ class TimeEncodingDiffusionModel(nn.Module):
         start_frames,
         end_frames,
         timestep=0.5,
-        num_inference_steps=25,
         guidance_scale=1.0,
-        noise_strength=0.25,
     ):
+        start_embed = self.encode_condition_CLIP(start_frames)
+        end_embed = self.encode_condition_CLIP(end_frames)
+        t_scalar = torch.tensor(timestep, device=self.device)
 
-        cond_embeds = self.generate_condition_embeds(
+        self._hook_cache = {
+            "start_embed": start_embed.unsqueeze(1),
+            "end_embed": end_embed.unsqueeze(1),
+            "t_scalar": t_scalar,
+        }
+
+        condition = self.generate_condition_image(
             start_frames, end_frames, timestep=timestep
         )
-
-        self.scheduler.set_timesteps(num_inference_steps, device=self.device)
-
-        z0 = self.encode_image_to_latent(start_frames)
-        z1 = self.encode_image_to_latent(end_frames)
-        z_init = self.slerp(z0, z1, timestep)
-
-        self.scheduler.set_timesteps(num_inference_steps, device=self.device)
-        timesteps = self.scheduler.timesteps
-
-        start_idx = int(noise_strength * (len(timesteps) - 1))
-        t_start = timesteps[start_idx]
-
-        noise = torch.randn_like(z_init)
-        latents = self.scheduler.add_noise(z_init, noise, t_start)
-        # latents = torch.randn(
-        #     (start_frames.shape[0], self.unet.in_channels, 64, 64),  # 64x64 for SD v1
-        #     device=self.device,
-        #     dtype=self.vae.dtype,
-        # )
-
-        if guidance_scale == 1.0:
-            for t in timesteps[start_idx:]:
-                noise_pred = self.unet(
-                    latents,
-                    t,
-                    encoder_hidden_states=cond_embeds,
-                ).sample
-
-                latents = self.scheduler.step(noise_pred, t, latents).prev_sample
-        else:
-            for t in timesteps[start_idx:]:
-                noise_pred = self.unet(
-                    latents,
-                    t,
-                    encoder_hidden_states=cond_embeds,
-                    guidance_scale=guidance_scale,
-                ).sample
-
-                latents = self.scheduler.step(noise_pred, t, latents).prev_sample
-        images = self.decode_latent_to_image(latents)
-
-        return images
+        images = self.pipe(condition, guidance_scale=guidance_scale)
+        self._hook_cache = None
+        return images["images"]
 
     def predict_inbetween_sequence(
         self,
         start_frames,
         end_frames,
         num_inbetweens=3,
-        num_denoising_steps=25,
         guidance_scale=1.0,
-        noise_strength=0.25,
     ):
         inbetween_frames = []
         timesteps = [(i + 1) / (num_inbetweens + 1) for i in range(num_inbetweens)]
@@ -454,18 +361,40 @@ class TimeEncodingDiffusionModel(nn.Module):
                 start_frames,
                 end_frames,
                 timestep=x,
-                num_inference_steps=num_denoising_steps,
                 guidance_scale=guidance_scale,
-                noise_strength=noise_strength,
             )
             inbetween_frames.append(imgs)
         # OUTPUT FORMAT: LIST OF LISTS WITH FIRST DIM FRAME_INDEX, SECOND DIM BATCH_INDEX
         return inbetween_frames
 
 
+def register_weighted_attn_hooks(parent_model):
+    def make_hook(attn_module):
+        def hook(module, input, output):
+            h = input[0]
+            t = parent_model._hook_cache["t_scalar"]
+            s_emb = parent_model._hook_cache["start_embed"]
+            e_emb = parent_model._hook_cache["end_embed"]
+
+            # Call forward directly to avoid hook recursion
+            out_start = attn_module.forward(h, encoder_hidden_states=s_emb)
+            torch.cuda.empty_cache()
+            out_end = attn_module.forward(h, encoder_hidden_states=e_emb)
+            torch.cuda.empty_cache()
+            return (1 - t) * out_start + t * out_end
+
+        return hook
+
+    for name, module in parent_model.unet.named_modules():
+
+        # print(name)
+        if name.endswith(".attn2"):
+            module.register_forward_hook(make_hook(module))
+
+
 def main(args):
 
-    print("Image Conditioned Diffusion8")
+    print("Image Conditioned Diffusion")
 
     print("loading dataset and dataloader...")
     train_data = AnitaDataset(
@@ -486,7 +415,16 @@ def main(args):
 
     print("initializing model...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = TimeEncodingDiffusionModel(save_dir=args.save_dir).to(device)
+    model = ImageConditionedDiffusion(save_dir=args.save_dir).to(device)
+
+    if args.checkpoint:
+        print(f"Loading checkpoint from {args.checkpoint}")
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            model.load_state_dict(checkpoint["state_dict"], strict=False)
+        else:
+            model.load_state_dict(checkpoint, strict=False)
+        print("Checkpoint loaded successfully!")
 
     print("starting training...")
 
@@ -512,12 +450,14 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Diffusion-Baseline-Inbetweening")
     parser.add_argument("--save_dir", default="output", type=str)
-    parser.add_argument("--num_denoising_steps", type=int, default=50)
+    parser.add_argument("--num_denoising_steps", type=int, default=25)
     parser.add_argument("--guidance_scale", type=float, default=1.0)
     parser.add_argument("--noise_strength", type=float, default=0.3)
     parser.add_argument("--num_epochs", type=int, default=25)
     parser.add_argument("--use_structure_loss", action="store_true")
     parser.add_argument("--data_dir", type=str, default=".")
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--batch_size", type=int, default=8)
+
     args = parser.parse_args()
     main(args)

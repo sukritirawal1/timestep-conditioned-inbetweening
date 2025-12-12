@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from PIL import Image
 import matplotlib.pyplot as plt
 
-from dataset import AnitaDataset
+from src.dataset import AnitaDataset
 from torch.utils.data import DataLoader
 import argparse
 import multiprocessing as mp

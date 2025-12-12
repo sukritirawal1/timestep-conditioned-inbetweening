@@ -11,7 +11,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-from dataset import AnitaDataset
+from src.dataset import AnitaDataset
 from torch.utils.data import DataLoader
 import argparse
 import gc
